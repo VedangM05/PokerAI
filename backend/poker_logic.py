@@ -247,39 +247,51 @@ def run_monte_carlo(
     Estimates win equity by randomly simulating complete boards and opponent hands.
     Matches the C++ server's approach: 2000 iterations by default, ties count as 0.5 wins.
     """
+    # Fast path + determinism improvements:
+    # - Avoid shuffling the whole deck each iteration (O(n) * iterations).
+    # - Sample only the needed unknown cards each iteration.
     wins = 0
     ties = 0
+
+    if iterations <= 0:
+        return 0.0
 
     full_deck = get_full_deck()
     known_cards = set(map(str, ai_hand + community_cards))
     sim_deck = [c for c in full_deck if str(c) not in known_cards]
 
-    for _ in range(iterations):
-        random.shuffle(sim_deck)
-        sim_community = list(community_cards)
-        cards_to_deal = 5 - len(sim_community)
+    missing_board = max(0, 5 - len(community_cards))
+    needed = missing_board + opponents_count * 2
+    if needed <= 0:
+        # No unknowns left: exact comparison
+        ai_best = get_best_hand(ai_hand, community_cards)
+        # If there are opponents but no cards to deal, treat as tie (shouldn't happen in normal play)
+        return 1.0 if opponents_count == 0 else 0.5
 
-        draw_pile = list(sim_deck)
-        # Deal community cards
-        for _ in range(cards_to_deal):
-            if draw_pile:
-                sim_community.append(draw_pile.pop())
+    # If deck is too small, degrade gracefully
+    needed = min(needed, len(sim_deck))
+
+    for _ in range(iterations):
+        draw = random.sample(sim_deck, needed)
+        sim_community = list(community_cards) + draw[:missing_board]
 
         ai_best = get_best_hand(ai_hand, sim_community)
 
         is_win = True
         is_tie = False
 
-        for _ in range(opponents_count):
-            if len(draw_pile) < 2:
+        idx = missing_board
+        for _opp in range(opponents_count):
+            if idx + 1 >= len(draw):
                 break
-            opp_hand = [draw_pile.pop(), draw_pile.pop()]
-            opp_best = get_best_hand(opp_hand, sim_community)
+            opp_hand = [draw[idx], draw[idx + 1]]
+            idx += 2
 
+            opp_best = get_best_hand(opp_hand, sim_community)
             if opp_best > ai_best:
                 is_win = False
                 break
-            elif opp_best == ai_best:
+            if opp_best == ai_best:
                 is_tie = True
 
         if is_win:
@@ -288,7 +300,7 @@ def run_monte_carlo(
             else:
                 wins += 1
 
-    return (wins + ties / 2.0) / iterations
+    return (wins + ties / 2.0) / float(iterations)
 
 
 # ===== Draw Detection (matches C++ AIAction draw detection) =====
@@ -478,6 +490,59 @@ class PokerAI:
 
         rand = random.randint(1, 100)
 
+        # ===== Pre-flop specific strategy =====
+        # The original C++ logic is post-flop oriented (pot-sized heuristics). Pre-flop,
+        # half-pot "value bets" become very aggressive relative to blinds, so we use a
+        # simpler opening/defending model.
+        if round_number == 0:
+            def preflop_key(h: List[Card]) -> Tuple[int, int, bool]:
+                v1 = h[0].value()
+                v2 = h[1].value() if len(h) > 1 else 0
+                hi, lo = (v1, v2) if v1 >= v2 else (v2, v1)
+                suited = (len(h) >= 2 and h[0].suit == h[1].suit)
+                return hi, lo, suited
+
+            hi, lo, suited = preflop_key(hand)
+            is_pair = hi == lo
+            # Crude but effective "range buckets"
+            premium = is_pair and hi >= 11 or (hi == 14 and lo >= 13)  # JJ+ or AK
+            strong = (is_pair and hi >= 9) or (hi == 14 and lo >= 11) or (hi == 13 and lo >= 12)  # 99+, AQ+, KQ
+            playable = suited and hi >= 11 and lo >= 9 or (hi >= 12 and lo >= 10) or (hi == 14 and lo >= 9)
+
+            # If checked to pre-flop, avoid auto-betting; mostly check unless strong.
+            if call_amt == 0:
+                if premium or (strong and rand <= 40):
+                    # Raise by a small multiple of big blind (increment semantics).
+                    r_amt = min(max(20, pot // 4), chips)  # usually 20-40 early
+                    if r_amt <= 0:
+                        return "CHECK", equity
+                    if r_amt >= chips:
+                        return "ALL_IN", equity
+                    return f"RAISE {r_amt}", equity
+                return "CHECK", equity
+
+            # Facing a bet pre-flop: defend selectively
+            if premium:
+                if call_amt >= chips:
+                    return "ALL_IN", equity
+                # 3-bet sometimes when deep enough
+                if chips > call_amt + 40 and rand <= 35:
+                    r_amt = min(call_amt + 40, chips)
+                    if r_amt >= chips:
+                        return "ALL_IN", equity
+                    return f"RAISE {r_amt}", equity
+                return "CALL", equity
+
+            if strong or playable:
+                if call_amt >= chips:
+                    return "ALL_IN", equity
+                # Call modest bets; fold to large ones
+                if call_amt <= max(20, pot // 2):
+                    return "CALL", equity
+                return "FOLD", equity
+
+            return "FOLD", equity
+
         # ===== CASE 1: No bet faced (call_amt == 0) =====
         if call_amt == 0:
             # Bluff: 10% on turn or river when checked to (round 2 or 3)
@@ -493,7 +558,8 @@ class PokerAI:
 
             # Value bet
             if equity > 0.6 or strong_draw:
-                b_amt = max(50, pot // 2)
+                # Smaller sizing to avoid overly aggressive play on early streets.
+                b_amt = max(20, pot // 3)
                 b_amt = min(b_amt, chips)
                 if b_amt <= 0:
                     return "CHECK", equity

@@ -19,6 +19,12 @@ ANTE_AMOUNT = 10
 MAX_PLAYERS = 4
 STARTING_CHIPS = 1000
 
+# Gameplay pacing (lower = faster gameplay)
+STREET_DEAL_DELAY_S = 0.2
+AI_THINK_DELAY_S = 0.1
+END_HAND_DELAY_S = 1.0
+SHOWDOWN_DELAY_S = 1.5
+
 
 # ================= PLAYER =================
 class Player:
@@ -141,9 +147,11 @@ async def join_game(sid, data):
     name = data.get("name", "Player")
     p = Player(sid, name)
     table.players.append(p)
+    table.log(f"{name} joined the table.")
 
     if not any(x.is_ai for x in table.players):
         table.players.append(Player("AI", "AI_Bot", is_ai=True))
+        table.log("AI_Bot joined the table.")
 
     await sio.emit("table_state", table.broadcast_state())
 
@@ -165,6 +173,7 @@ async def disconnect(sid):
         if p.sid == sid:
             p.is_connected = False
             p.folded = True
+            table.log(f"{p.name} disconnected.")
             if table.current_turn_sid == sid:
                 table.pending_move = {"type": "FOLD"}
                 table.move_event.set()
@@ -177,12 +186,14 @@ async def game_loop():
             break
 
         table.reset_hand()
+        table.log("New hand starting.")
 
         # ANTE
         for p in table.players:
             amt = min(p.chips, ANTE_AMOUNT)
             p.chips -= amt
             table.pot += amt
+        table.log(f"Antes posted. Pot = {table.pot}.")
 
         # BLINDS
         sb = table.players[0]
@@ -199,43 +210,56 @@ async def game_loop():
 
         table.current_bet = BIG_BLIND
         table.pot += sb_amt + bb_amt
+        table.log(f"Blinds posted. SB={sb_amt}, BB={bb_amt}. Pot = {table.pot}.")
 
         await deal()
 
+        # Pre-flop: action starts left of the big blind (index 2 in this seat model)
+        table.turn_index = 2 % len(table.players)
         if not await betting_round():
             await end_hand()
             continue
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(STREET_DEAL_DELAY_S)
         # FLOP
         table.round_number = 1
+        table.round_name = "FLOP"
         table.community_cards = [table.deck.pop() for _ in range(3)]
+        table.log(f"Flop: {' '.join(str(c) for c in table.community_cards)}")
         await sio.emit("table_state", table.broadcast_state())
 
+        # Post-flop: action starts at small blind (index 0) in this simplified model
+        table.turn_index = 0
         if not await betting_round():
             await end_hand()
             continue
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(STREET_DEAL_DELAY_S)
         # TURN
         table.round_number = 2
+        table.round_name = "TURN"
         table.community_cards.append(table.deck.pop())
+        table.log(f"Turn: {table.community_cards[-1]}")
         await sio.emit("table_state", table.broadcast_state())
 
+        table.turn_index = 0
         if not await betting_round():
             await end_hand()
             continue
 
         # RIVER
         table.round_number = 3
+        table.round_name = "RIVER"
         table.community_cards.append(table.deck.pop())
+        table.log(f"River: {table.community_cards[-1]}")
         await sio.emit("table_state", table.broadcast_state())
 
+        table.turn_index = 0
         if not await betting_round():
             await end_hand()
             continue
 
-        await asyncio.sleep(1)
+        await asyncio.sleep(STREET_DEAL_DELAY_S)
         await showdown()
 
 
@@ -251,18 +275,21 @@ async def betting_round():
     while True:
         active = [p for p in table.players if not p.folded and p.is_connected]
         if len(active) <= 1:
+            table.current_turn_sid = None
             return False
 
-        p = table.players[turn % len(table.players)]
+        p_index = turn % len(table.players)
+        p = table.players[p_index]
 
         if not p.folded and not p.all_in and p.is_connected:
             table.current_turn_sid = p.sid
             await sio.emit("table_state", table.broadcast_state())
 
             if p.is_ai:
-                await asyncio.sleep(1)  # small ai thinking pause
+                await asyncio.sleep(AI_THINK_DELAY_S)  # small ai thinking pause
                 loop = asyncio.get_running_loop()
                 import functools
+                opponent = next((x for x in table.players if (not x.is_ai) and (not x.folded) and x.is_connected), None)
                 action_str, equity = await loop.run_in_executor(
                     None,
                     functools.partial(
@@ -273,7 +300,8 @@ async def betting_round():
                         player_bet=p.current_bet,
                         pot=table.pot,
                         chips=p.chips,
-                        round_number=table.round_number
+                        round_number=table.round_number,
+                        opponent_model=opponent.as_opponent_model() if opponent else None
                     )
                 )
                 p.win_probability = equity
@@ -295,7 +323,9 @@ async def betting_round():
             await sio.emit("table_state", table.broadcast_state())
 
             if is_raise:
-                turn = 0
+                # After a raise, action resumes with the next player after the raiser,
+                # not seat 0. This prevents repeated/incorrect turn order.
+                turn = (p_index + 1) % len(table.players)
                 continue
 
         turn += 1
@@ -309,12 +339,17 @@ async def betting_round():
             break
 
     table.turn_index = turn
+    # Important: clear turn marker between betting rounds so clients
+    # don't think someone is still "on turn" and block actions.
+    table.current_turn_sid = None
     return True
 
 
 async def apply_action(player, action):
     atype = action.get("type", "FOLD").upper()
     call_amt = table.current_bet - player.current_bet
+    voluntary = False
+    is_raise = False
 
     if atype == "CHECK" and call_amt > 0:
         atype = "CALL"
@@ -322,33 +357,48 @@ async def apply_action(player, action):
     if atype == "FOLD":
         player.folded = True
         player.last_action = "Fold"
+        table.log(f"{player.name} folds.")
 
     elif atype == "CALL":
         amt = min(call_amt, player.chips)
         player.chips -= amt
         player.current_bet += amt
         table.pot += amt
+        voluntary = amt > 0
         player.last_action = "Check" if amt == 0 else "Call"
+        if amt == 0:
+            table.log(f"{player.name} checks.")
+        else:
+            table.log(f"{player.name} calls {amt}. Pot = {table.pot}.")
 
     elif atype == "RAISE":
-        total = action.get("amount", 50)
-        put = total - player.current_bet
+        # C++ semantics: "RAISE <rAmt>" means raise BY rAmt over the current bet.
+        # total becomes (current_bet + rAmt).
+        r_amt = int(action.get("amount", 50))
+        total = table.current_bet + r_amt
+        put_in = total - player.current_bet  # includes call amount + raise increment
+        voluntary = True
 
-        if put >= player.chips:
-            put = player.chips
+        if put_in >= player.chips:
+            put_in = player.chips
+            total = player.current_bet + put_in
             player.all_in = True
             player.last_action = "All-In"
+            table.log(f"{player.name} goes all-in for {put_in}. Pot = {table.pot + put_in}.")
         else:
-            player.last_action = f"Raise {total}"
+            player.last_action = f"Raise {r_amt}"
+            table.log(f"{player.name} raises +{r_amt}. Pot = {table.pot + put_in}.")
 
-        player.chips -= put
-        player.current_bet += put
-        table.pot += put
+        player.chips -= put_in
+        table.pot += put_in
+        player.current_bet = total
 
         if player.current_bet > table.current_bet:
             table.current_bet = player.current_bet
+            is_raise = True
 
-        return True, True
+        # Raise affects action order even if it's an all-in raise.
+        return True, is_raise
 
     elif atype == "ALL_IN":
         amt = player.chips
@@ -356,14 +406,25 @@ async def apply_action(player, action):
         player.current_bet += amt
         table.pot += amt
         player.all_in = True
+        voluntary = amt > 0
         player.last_action = "All-In"
+        table.log(f"{player.name} goes all-in for {amt}. Pot = {table.pot}.")
 
         if player.current_bet > table.current_bet:
             table.current_bet = player.current_bet
+            is_raise = True
 
-        return True, True
+        return True, is_raise
 
-    return True, False
+    # --- Stat tracking (C++ parity) ---
+    if table.round_number == 0 and (not player.is_ai) and player.is_connected:
+        if voluntary:
+            player.vpip_actions += 1
+        if is_raise and (not table.pre_flop_raise_made):
+            player.pfr_actions += 1
+            table.pre_flop_raise_made = True
+
+    return True, is_raise
 
 
 # ================= HELPERS =================
@@ -378,9 +439,10 @@ async def end_hand():
     winner = next((p for p in table.players if not p.folded), None)
     if winner:
         winner.chips += table.pot
+        table.log(f"{winner.name} wins {table.pot} (last standing).")
     table.pot = 0
     await sio.emit("table_state", table.broadcast_state())
-    await asyncio.sleep(3)
+    await asyncio.sleep(END_HAND_DELAY_S)
 
 
 async def showdown():
@@ -394,10 +456,14 @@ async def showdown():
         split = table.pot // len(winners)
         for w in winners:
             w.chips += split
+        if len(winners) == 1:
+            table.log(f"{winners[0].name} wins {table.pot} at showdown.")
+        else:
+            table.log(f"Split pot: {table.pot} between {', '.join(w.name for w in winners)}.")
 
     table.pot = 0
     await sio.emit("table_state", table.broadcast_state())
-    await asyncio.sleep(4)
+    await asyncio.sleep(SHOWDOWN_DELAY_S)
 
 
 # ================= RUN =================

@@ -152,9 +152,14 @@ export default function PokerTable() {
 
   const canCheck = callAmount === 0;
 
-  // Raise amount must be at least the current bet level + a min bump
-  const minRaise = tableState ? tableState.current_bet + 10 : 10;
-  const effectiveRaise = Math.max(raiseAmount, minRaise);
+  // C++ semantics: "RAISE <amount>" means raise BY <amount> over current bet.
+  // When there is no bet (callAmount===0), this acts like a bet size.
+  const minRaise = 10;
+  const maxRaise =
+    myPlayer && tableState
+      ? Math.max(0, myPlayer.chips - callAmount) // put-in = callAmount + raiseAmount must fit in chips
+      : 0;
+  const effectiveRaise = Math.min(Math.max(raiseAmount, minRaise), maxRaise || raiseAmount);
 
   // ── Actions ──────────────────────────────────────────────────────────────────
   const sendAction = useCallback(
@@ -185,6 +190,12 @@ export default function PokerTable() {
       setActionSent(false);
     }
   }, [myPlayer?.is_turn]);
+
+  // Also reset the action guard when the betting round (street) changes.
+  // Without this, the UI can remain locked out and the server will auto-fold on timeout.
+  useEffect(() => {
+    setActionSent(false);
+  }, [tableState?.round]);
 
   const sendChat = () => {
     if (!chatInput.trim()) return;
@@ -309,13 +320,13 @@ export default function PokerTable() {
                   animate={{ opacity: 1, y: 0, rotateY: 0 }}
                   transition={{ delay: i * 0.08 }}
                 >
-                  <Card cardStr={c} className="shadow-2xl flex-shrink-0 w-10 h-14 sm:w-20 sm:h-28" />
+                  <Card cardStr={c} className="shadow-2xl flex-shrink-0 w-10 sm:w-20" />
                 </motion.div>
               ))}
               {Array.from({ length: 5 - (tableState?.community.length ?? 0) }).map((_, i) => (
                 <div
                   key={`empty-${i}`}
-                  className="w-10 h-14 sm:w-20 sm:h-28 rounded-lg border-2 border-dashed border-emerald-900/50 bg-emerald-900/10 flex items-center justify-center flex-shrink-0"
+                  className="w-10 sm:w-20 aspect-[5/7] rounded-lg border-2 border-dashed border-emerald-900/50 bg-emerald-900/10 flex items-center justify-center flex-shrink-0"
                 >
                   <span className="text-emerald-900/20 font-black text-xl sm:text-4xl italic">P</span>
                 </div>
@@ -368,7 +379,7 @@ export default function PokerTable() {
                         <Card
                           key={idx}
                           cardStr={c}
-                          className="w-8 h-12 sm:w-14 sm:h-20 shadow-2xl ring-2 ring-emerald-500/50"
+                          className="w-8 sm:w-14 shadow-2xl ring-2 ring-emerald-500/50"
                         />
                       ))}
                     </div>
@@ -474,7 +485,7 @@ export default function PokerTable() {
                     {ai.ai_hand && ai.ai_hand.length > 0 ? (
                       <div className="flex gap-1.5">
                         {ai.ai_hand.map((c, idx) => (
-                          <Card key={idx} cardStr={c} className="w-10 h-14 ring-1 ring-white/10" />
+                          <Card key={idx} cardStr={c} className="w-10 ring-1 ring-white/10" />
                         ))}
                       </div>
                     ) : (
@@ -665,7 +676,7 @@ export default function PokerTable() {
                   disabled={!isMyTurn}
                   className="flex-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black px-6 py-3 rounded-xl transition active:scale-95 disabled:opacity-20 disabled:grayscale disabled:cursor-not-allowed text-xs uppercase shadow-xl shadow-emerald-500/20"
                 >
-                  Raise ${effectiveRaise}
+                  {canCheck ? `Bet $${effectiveRaise}` : `Raise +$${effectiveRaise}`}
                 </button>
                 {/* All-In shortcut */}
                 <button
@@ -679,15 +690,15 @@ export default function PokerTable() {
               <input
                 type="range"
                 min={minRaise}
-                max={myPlayer?.chips ?? 1000}
+                max={maxRaise || (myPlayer?.chips ?? 1000)}
                 step={10}
                 value={effectiveRaise}
                 onChange={(e) => setRaiseAmount(parseInt(e.target.value))}
                 className="accent-emerald-400 h-1 rounded-full cursor-pointer"
               />
               <div className="flex justify-between text-[8px] text-slate-600 font-mono">
-                <span>Min ${minRaise}</span>
-                <span>Max ${myPlayer?.chips ?? "—"}</span>
+                <span>Min +${minRaise}</span>
+                <span>Max +${maxRaise || "—"}</span>
               </div>
             </div>
           </div>

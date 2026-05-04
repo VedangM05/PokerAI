@@ -51,9 +51,14 @@ const SuitIcon = ({ suit, className, color }: any) => {
 // ================= CORNER =================
 function Corner({ rank, suit, color, flip = false }: any) {
   return (
-    <div className={cn("flex flex-col items-center text-xs font-bold", flip && "rotate-180")}>
+    <div
+      className={cn(
+        "flex flex-col items-center font-bold leading-none",
+        "text-[9px] sm:text-[11px]",
+        flip && "rotate-180"
+      )}
+    >
       <span style={{ color }}>{rank}</span>
-      <SuitIcon suit={suit} color={color} className="w-3 h-3" />
     </div>
   );
 }
@@ -61,56 +66,11 @@ function Corner({ rank, suit, color, flip = false }: any) {
 // ================= FACE =================
 function FaceCenter({ rank, suit, color }: any) {
   return (
-    <div className="flex flex-col items-center justify-center gap-1">
-      <span className="font-serif font-extrabold text-3xl" style={{ color }}>
+    <div className="flex flex-col items-center justify-center gap-0.5">
+      <span className="font-serif font-extrabold text-2xl sm:text-3xl" style={{ color }}>
         {rank}
       </span>
-      <SuitIcon suit={suit} color={color} className="w-8 h-8" />
-    </div>
-  );
-}
-
-// ================= REAL PIP LAYOUT =================
-function PipCenter({ rank, suit, color }: any) {
-  const layouts: Record<string, string[]> = {
-    "2": ["center", "center-flip"],
-    "3": ["top", "center", "bottom"],
-    "4": ["tl", "tr", "bl", "br"],
-    "5": ["tl", "tr", "center", "bl", "br"],
-    "6": ["tl", "tr", "ml", "mr", "bl", "br"],
-    "7": ["tl", "tr", "ml", "center", "mr", "bl", "br"],
-    "8": ["tl", "tr", "ml", "mr", "bl", "br", "tm", "bm"],
-    "9": ["tl", "tr", "ml", "center", "mr", "bl", "br", "tm", "bm"],
-    "10": ["tl", "tr", "ml", "mr", "bl", "br", "tm", "bm", "cl", "cr"],
-  };
-
-  const posMap: Record<string, string> = {
-    tl: "top-2 left-3",
-    tr: "top-2 right-3",
-    bl: "bottom-2 left-3",
-    br: "bottom-2 right-3",
-    ml: "top-1/2 left-3 -translate-y-1/2",
-    mr: "top-1/2 right-3 -translate-y-1/2",
-    center: "top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2",
-    "center-flip": "top-1/2 left-1/2 -translate-x-1/2 translate-y-1/2 rotate-180",
-    top: "top-3 left-1/2 -translate-x-1/2",
-    bottom: "bottom-3 left-1/2 -translate-x-1/2",
-    tm: "top-3 left-1/2 -translate-x-1/2",
-    bm: "bottom-3 left-1/2 -translate-x-1/2",
-    cl: "top-1/2 left-6 -translate-y-1/2",
-    cr: "top-1/2 right-6 -translate-y-1/2",
-  };
-
-  return (
-    <div className="relative w-full h-full">
-      {(layouts[rank] || []).map((p, i) => (
-        <SuitIcon
-          key={i}
-          suit={suit}
-          color={color}
-          className={cn("absolute w-4 h-4", posMap[p])}
-        />
-      ))}
+      <SuitIcon suit={suit} color={color} className="w-6 h-6 sm:w-8 sm:h-8" />
     </div>
   );
 }
@@ -120,7 +80,11 @@ export function Card({ cardStr, hidden = false, className }: CardProps) {
   if (hidden || !cardStr) {
     return (
       <motion.div
-        className={cn("w-16 h-24 sm:w-24 sm:h-32 rounded-2xl overflow-hidden shadow-lg", className)}
+        className={cn(
+          "relative overflow-hidden rounded-2xl shadow-lg border border-white/10",
+          "aspect-[5/7] w-16 sm:w-24",
+          className
+        )}
       >
         <div className="absolute inset-0 bg-gradient-to-br from-slate-900 via-blue-900 to-slate-950" />
         <div className="absolute inset-0 flex items-center justify-center opacity-30">
@@ -133,36 +97,28 @@ export function Card({ cardStr, hidden = false, className }: CardProps) {
   const suit = normalizeSuit(cardStr.slice(-1));
   const rank = cardStr.slice(0, -1);
   const color = suitColors[suit];
-  const isFace = ["J", "Q", "K"].includes(rank);
-  const isAce = rank === "A";
 
   return (
     <motion.div
       whileHover={{ y: -6, scale: 1.05 }}
       className={cn(
-        "relative w-16 h-24 sm:w-24 sm:h-32",
-        "bg-white rounded-2xl shadow-md border",
-        "flex flex-col overflow-hidden",
+        "relative bg-white rounded-2xl shadow-md border border-black/10",
+        "aspect-[5/7] w-16 sm:w-24",
+        "flex flex-col overflow-hidden select-none",
         className
       )}
     >
       {/* corners */}
-      <div className="absolute top-2 left-2">
+      <div className="absolute top-1.5 left-1.5 sm:top-2 sm:left-2">
         <Corner rank={rank} suit={suit} color={color} />
       </div>
-      <div className="absolute bottom-2 right-2">
+      <div className="absolute bottom-1.5 right-1.5 sm:bottom-2 sm:right-2">
         <Corner rank={rank} suit={suit} color={color} flip />
       </div>
 
       {/* center */}
       <div className="flex-1 flex items-center justify-center">
-        {isFace ? (
-          <FaceCenter rank={rank} suit={suit} color={color} />
-        ) : isAce ? (
-          <SuitIcon suit={suit} color={color} className="w-10 h-10" />
-        ) : (
-          <PipCenter rank={rank} suit={suit} color={color} />
-        )}
+        <FaceCenter rank={rank} suit={suit} color={color} />
       </div>
     </motion.div>
   );
